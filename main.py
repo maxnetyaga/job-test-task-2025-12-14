@@ -3,6 +3,7 @@ import datetime
 import json
 import logging
 import os
+import signal
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
@@ -84,14 +85,23 @@ tempdir = (
     Path(tempfile.gettempdir())
     / "netyaga-test-task-2025-12-14"
     / datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%d%m%Y%H%M%S")
+    / f"{os.getppid()}"
 )
 tempdir.mkdir(exist_ok=True, parents=True)
+local_socket_path = tempdir / f"worker-{PROC_ID}"
+
+# Global state
 stats_lock = filelock.FileLock(tempdir / "stats.lock")
 pending_stats_update_task: asyncio.Task | None = None
+shutdown_requested_at = None
+local_socket_listen_task = None
+connections: dict[uuid.UUID, WebSocket] = {}
+loop = None
 
-
+# Config
 port = os.environ.get("PORT") or 12696
 stats_path = Path(os.environ.get("STATS_PATH") or "./stats.json")
+shutdown_timeout = int(os.environ.get("SHUTDOWN_TIMEOUT") or 0) or 1800
 admin_username = os.environ.get("ADMIN_USERNAME")
 admin_password = os.environ.get("ADMIN_PASSWORD")
 if not admin_username or not admin_password:
@@ -99,9 +109,6 @@ if not admin_username or not admin_password:
         f"Admin's username and password must be provided. Got: {admin_username=}, {admin_password=}"
     )
 
-local_socket_listen_task = None
-
-connections: dict[uuid.UUID, WebSocket] = {}
 
 type PID = int
 
@@ -117,6 +124,7 @@ class Stats(BaseModel):
 
 
 async def update_stats(stats_path: Path | str):
+    global pending_stats_update_task  # noqa: PLW0603
     stats_path = Path(stats_path)
     try:
         with stats_lock:
@@ -146,7 +154,7 @@ async def update_stats(stats_path: Path | str):
 
     except filelock.Timeout:
         await asyncio.sleep(STATS_UPDATE_RETRY_INTERVAL)
-        await update_stats(stats_path)
+        pending_stats_update_task = asyncio.create_task(update_stats(stats_path))
 
 
 def update_stats_safe(stats_path: Path | str):
@@ -191,9 +199,63 @@ async def _listen_local_socket(local_socket_path: Path):
     )
 
 
+async def _cleanup():
+    local_socket_path.unlink(missing_ok=True)
+    stats_path.unlink(missing_ok=True)
+    logger.info("Worker's been shut down 💤")
+
+
+async def _wait_for_users_disconnect():
+    logger.info("len(connections)=%s", len(connections))
+    while len(connections) != 0:
+        await asyncio.sleep(1)
+
+
+async def _gracefull_shutdown(timeout):
+    global shutdown_requested_at
+    shutdown_requested_at = datetime.datetime.now()
+
+    await asyncio.wait_for(_wait_for_users_disconnect(), timeout)
+    assert loop
+    await _cleanup()
+    loop.stop()
+
+
+def _log_shutdown_info():
+    if shutdown_requested_at is None:
+        raise Exception("Can be used only during shutdown!")
+
+    minutes_till_shutdown = (
+        shutdown_timeout - (datetime.datetime.now() - shutdown_requested_at).seconds
+    ) // 60
+
+    logger.info("Shutdown is pending...")
+    logger.info("Shutting down in %s minutes", minutes_till_shutdown)
+    logger.info(
+        "%d active connection left: [%s]",
+        len(connections),
+        ", ".join([str(x) for x in connections]),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    local_socket_path = tempdir / f"worker-{PROC_ID}"
+    global loop  # noqa: PLW0603
+    loop = asyncio.get_event_loop()
+
+    signal.signal(
+        signal.SIGINT,
+        lambda _, __: asyncio.create_task(_gracefull_shutdown(shutdown_timeout))
+        if not shutdown_requested_at
+        else _log_shutdown_info(),
+    )
+    signal.signal(
+        signal.SIGTERM,
+        lambda _, __: asyncio.create_task(_gracefull_shutdown(shutdown_timeout))
+        if not shutdown_requested_at
+        else _log_shutdown_info(),
+    )
+
     stats_path.unlink(missing_ok=True)
 
     global local_socket_listen_task  # noqa: PLW0603
@@ -203,7 +265,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    local_socket_path.unlink()
+    # Actually may never accure
+    await _cleanup()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -212,6 +275,12 @@ security = HTTPBasic()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if shutdown_requested_at is not None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service doesn't accept new connections",
+        )
+
     try:
         await websocket.accept()
         client_id = uuid.uuid4()
@@ -219,7 +288,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
         logger.info("Client %s connected!", client_id)
         await websocket.send_text(f"Your id: {client_id}")
-        logger.debug("HELLLLLO")
         update_stats_safe(stats_path)
 
         async def listen():
