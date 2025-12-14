@@ -2,16 +2,24 @@
 
 import asyncio
 import os
-import signal
 
 import websockets
+from websockets.exceptions import ConnectionClosedError
 
 stop_requested = False
 
 
 async def _listen(conn: websockets.ClientConnection):
     while True:
-        msg = await conn.recv()
+        try:
+            msg = await conn.recv()
+        except ConnectionClosedError:
+            print("Connectin closed")
+            return
+        except asyncio.CancelledError:
+            print()
+            return
+
         print(msg)
 
 
@@ -21,22 +29,10 @@ async def main():
     ) as conn:
         print("Connection established!")
 
-        listen_coro = asyncio.create_task(_listen(conn))
-
-        while not stop_requested:
-            await asyncio.sleep(1)
-
-        listen_coro.cancel()
-
-
-def _exit(loop: asyncio.AbstractEventLoop):
-    global stop_requested
-    stop_requested = True
+        await _listen(conn)
 
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
-    signal.signal(signal.SIGINT, lambda *args: _exit(loop))
-    signal.signal(signal.SIGTERM, lambda *args: _exit(loop))
 
     asyncio.run(main())

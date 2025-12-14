@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import logging
 import os
 import tempfile
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
+import filelock
 import psutil
 from fastapi import (
     Body,
@@ -17,8 +19,10 @@ from fastapi import (
     WebSocket,
     status,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.websockets import WebSocketState
+from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketDisconnect
 
 COLORS = [
@@ -59,13 +63,22 @@ class ProcessColorFormatter(logging.Formatter):
         return super().format(record)
 
 
-logger = logging.getLogger("uvicorn")
-for handler in logger.handlers:
+uvicorn_logger = logging.getLogger("uvicorn")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+for handler in uvicorn_logger.handlers:
     handler.setFormatter(
         ProcessColorFormatter(
             "%(asctime)s | PID=%(process)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s"
         )
     )
+    logger.addHandler(handler)
+
+################################################################################
+
+# In seconds
+STATS_UPDATE_RETRY_INTERVAL = 0.1
+PROC_ID = os.getpid()
 
 tempdir = (
     Path(tempfile.gettempdir())
@@ -73,9 +86,12 @@ tempdir = (
     / datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%d%m%Y%H%M%S")
 )
 tempdir.mkdir(exist_ok=True, parents=True)
+stats_lock = filelock.FileLock(tempdir / "stats.lock")
+pending_stats_update_task: asyncio.Task | None = None
 
-# load_dotenv(dotenv_path="./.env")
+
 port = os.environ.get("PORT") or 12696
+stats_path = Path(os.environ.get("STATS_PATH") or "./stats.json")
 admin_username = os.environ.get("ADMIN_USERNAME")
 admin_password = os.environ.get("ADMIN_PASSWORD")
 if not admin_username or not admin_password:
@@ -86,6 +102,61 @@ if not admin_username or not admin_password:
 local_socket_listen_task = None
 
 connections: dict[uuid.UUID, WebSocket] = {}
+
+type PID = int
+
+
+class ClientsPerProcess(BaseModel):
+    count: int = 0
+    clients: list[uuid.UUID] = Field(default_factory=list)
+
+
+class Stats(BaseModel):
+    clients_per_process: dict[PID, ClientsPerProcess] = Field(default_factory=dict)
+    total: int = 0
+
+
+async def update_stats(stats_path: Path | str):
+    stats_path = Path(stats_path)
+    try:
+        with stats_lock:
+            logger.debug("Acquired stats file lock")
+            stats: Stats = (
+                Stats.model_validate_json(stats_path.read_text(encoding="utf-8"))
+                if stats_path.exists()
+                else Stats()
+            )
+
+            prev_per_process_client_count = 0
+            if PROC_ID not in stats.clients_per_process:
+                stats.clients_per_process[PROC_ID] = ClientsPerProcess()
+            else:
+                prev_per_process_client_count = stats.clients_per_process[PROC_ID].count
+
+            stats.clients_per_process[PROC_ID].count = len(connections)
+            stats.clients_per_process[PROC_ID].clients = list(connections.keys())
+
+            total_delta = len(connections) - prev_per_process_client_count
+            stats.total += total_delta
+
+            # FastApi jsonable_encoder to treat UUIDs
+            stats_path.write_text(
+                json.dumps(jsonable_encoder(stats), indent=2, ensure_ascii=False)
+            )
+
+    except filelock.Timeout:
+        await asyncio.sleep(STATS_UPDATE_RETRY_INTERVAL)
+        await update_stats(stats_path)
+
+
+def update_stats_safe(stats_path: Path | str):
+    """Update stats non-blocking"""
+    global pending_stats_update_task
+    if pending_stats_update_task is not None and not pending_stats_update_task.done():
+        return
+
+    logger.debug("Created task to update stats")
+    pending_stats_update_task = asyncio.create_task(update_stats(stats_path))
 
 
 async def _local_socket_handle(
@@ -122,7 +193,8 @@ async def _listen_local_socket(local_socket_path: Path):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    local_socket_path = tempdir / f"worker-{os.getpid()}"
+    local_socket_path = tempdir / f"worker-{PROC_ID}"
+    stats_path.unlink(missing_ok=True)
 
     global local_socket_listen_task  # noqa: PLW0603
     local_socket_listen_task = asyncio.create_task(
@@ -147,6 +219,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
         logger.info("Client %s connected!", client_id)
         await websocket.send_text(f"Your id: {client_id}")
+        logger.debug("HELLLLLO")
+        update_stats_safe(stats_path)
 
         async def listen():
             while websocket.client_state != WebSocketState.DISCONNECTED:
@@ -160,6 +234,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("Client %s has disconneted", client_id)
     finally:
         del connections[client_id]
+        update_stats_safe(stats_path)
 
 
 @app.post("/send")
