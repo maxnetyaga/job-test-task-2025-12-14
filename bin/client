@@ -1,0 +1,41 @@
+#!/bin/env python3
+
+import asyncio
+import os
+import signal
+
+import websockets
+
+stop_requested = False
+
+
+async def _listen(conn: websockets.ClientConnection):
+    msg = await conn.recv()
+    print(msg)
+
+
+async def main():
+    async with websockets.connect(
+        f"ws://localhost:{os.getenv('PORT') or 12696}/ws"
+    ) as conn:
+        print("Connection established!")
+
+        listen_coro = asyncio.create_task(_listen(conn))
+
+        while not stop_requested:
+            await asyncio.sleep(1)
+
+        listen_coro.cancel()
+
+
+def _exit(loop: asyncio.AbstractEventLoop):
+    global stop_requested
+    stop_requested = True
+
+
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    signal.signal(signal.SIGINT, lambda *args: _exit(loop))
+    signal.signal(signal.SIGTERM, lambda *args: _exit(loop))
+
+    asyncio.run(main())
