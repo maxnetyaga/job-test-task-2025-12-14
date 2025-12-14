@@ -1,1 +1,78 @@
 #!/bin/env python3
+
+import asyncio
+import json
+import os
+from uuid import UUID
+
+import click
+import requests
+from requests.auth import HTTPBasicAuth
+
+
+async def _main(to_all: bool, send_to: UUID, message: str):
+    if admin_username is None or admin_password is None:
+        raise Exception(
+            f"Admin's username and password must be provided. Got: {admin_username=}, {admin_password=}"
+        )
+
+    http_auth = HTTPBasicAuth(username=admin_username, password=admin_password)
+
+    try:
+        res = requests.post(
+            f"http://localhost:{port}/send",
+            auth=http_auth,
+            timeout=1000,
+            params={
+                "to_all": json.dumps(to_all),
+                "client_id": str(send_to) if send_to else None,
+            },
+            json=message,
+        )
+
+        if res.status_code >= 300:
+            print(f"Connection error: {res.status_code}")
+            try:
+                print(
+                    json.dumps(
+                        json.loads(res.content.decode() or ""),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            except Exception:
+                print(res.content.decode())
+
+            return
+
+        print("Request has been sent!")
+
+    except requests.exceptions.ConnectionError as e:
+        print(
+            f"Connection error: {e.response.status_code if e.response else "can't establish connection"}"
+        )
+
+
+@click.command("send")
+@click.option("--message", help="Message to be sent", type=str)
+@click.option("--to-all", help="Send message to all users", is_flag=True, prompt=True)
+@click.option("--send-to", help="Target user id", type=UUID)
+def main(**kwargs):
+    if not kwargs["to_all"]:
+        kwargs["send_to"] = click.prompt("Target user id", type=UUID)
+
+    kwargs["message"] = click.prompt("Message", type=str)
+
+    asyncio.run(_main(**kwargs))
+
+
+if __name__ == "__main__":
+    port = os.environ.get("PORT") or 12696
+    admin_username = os.environ.get("ADMIN_USERNAME")
+    admin_password = os.environ.get("ADMIN_PASSWORD")
+    if admin_username is None or admin_password is None:
+        raise Exception(
+            f"Admin's username and password must be provided. Got: {admin_username=}, {admin_password=}"
+        )
+
+    main()

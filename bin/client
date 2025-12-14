@@ -10,8 +10,9 @@ stop_requested = False
 
 
 async def _listen(conn: websockets.ClientConnection):
-    msg = await conn.recv()
-    print(msg)
+    while True:
+        msg = await conn.recv()
+        print(msg)
 
 
 async def main():
