@@ -1,0 +1,15 @@
+name: netyaga-test-task-2025-12-14
+root: .
+
+windows:
+  - main:
+      layout: main-vertical
+      panes:
+        - uvicorn main:app --workers $(nproc)
+        - send
+        - sleep 2 && client
+        - sleep 3 && client
+        - sleep 4 && client
+        - sleep 5 && client
+        - sleep 6 && while true; do less -K ./stats.json || exit; done
+

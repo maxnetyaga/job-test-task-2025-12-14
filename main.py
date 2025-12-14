@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import json
 import logging
@@ -214,7 +215,9 @@ async def _gracefull_shutdown(timeout):
     global shutdown_requested_at
     shutdown_requested_at = datetime.datetime.now()
 
-    await asyncio.wait_for(_wait_for_users_disconnect(), timeout)
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(_wait_for_users_disconnect(), timeout)
+
     assert loop
     await _cleanup()
     loop.stop()
