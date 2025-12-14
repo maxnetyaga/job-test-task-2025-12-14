@@ -320,7 +320,16 @@ async def send(
         )
 
     for socket in [p for p in tempdir.iterdir() if p.is_socket()]:
-        _, writer = await asyncio.open_unix_connection(socket)
+        while True:
+            try:
+                _, writer = await asyncio.open_unix_connection(socket)
+                break
+            except ConnectionRefusedError:
+                logger.info(
+                    "Some worker probably no fully initialized. Retrying to send message in 1 second..."
+                )
+                await asyncio.sleep(1)
+                continue
 
         client_id = client_id or uuid.UUID(int=0)
 
