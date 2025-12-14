@@ -201,7 +201,6 @@ async def _listen_local_socket(local_socket_path: Path):
 
 async def _cleanup():
     local_socket_path.unlink(missing_ok=True)
-    stats_path.unlink(missing_ok=True)
     logger.info("Worker's been shut down 💤")
 
 
