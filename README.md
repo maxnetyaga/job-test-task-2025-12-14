@@ -9,8 +9,8 @@ After setup you can use [*tmuxinator*](https://github.com/tmuxinator/tmuxinator)
 I intercept workers' SIGTERM and SIGINT signals and process them in this way:
 
 ```python
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(_wait_for_users_disconnect(), timeout)
+with contextlib.suppress(TimeoutError):
+    await asyncio.wait_for(_wait_for_users_disconnect(), timeout)
 ```
 ```asyncio.wait_for``` waits till _wait_for_users_disconnect() finishes or timeout gets ellapsed. Then I do a bit of cleanup and stop event loop.
 

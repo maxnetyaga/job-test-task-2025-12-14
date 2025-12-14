@@ -95,7 +95,6 @@ local_socket_path = tempdir / f"worker-{PROC_ID}"
 stats_lock = filelock.FileLock(tempdir / "stats.lock")
 pending_stats_update_task: asyncio.Task | None = None
 shutdown_requested_at = None
-local_socket_listen_task = None
 connections: dict[uuid.UUID, WebSocket] = {}
 loop = None
 
@@ -260,10 +259,7 @@ async def lifespan(app: FastAPI):
 
     stats_path.unlink(missing_ok=True)
 
-    global local_socket_listen_task  # noqa: PLW0603
-    local_socket_listen_task = asyncio.create_task(
-        _listen_local_socket(local_socket_path=local_socket_path)
-    )
+    await _listen_local_socket(local_socket_path=local_socket_path)
 
     yield
 
