@@ -1,6 +1,6 @@
 # Setup
 Run ```uv sync``` to initialize venv and install python packages (or use any other tool that can process pyproject.toml).
-You also need to source .envrc file in order to update PATH and load some more environment variables that used by programm.
+You also need to source .envrc file in order to update PATH and load some environment variables that used by programm.
 
 # Usage
 After setup you can use [*tmuxinator*](https://github.com/tmuxinator/tmuxinator) to start test tmux environment (launches main server with one worker per each machine core; opens 1 message send cli, 4 client panges and file with session statistics in *less* (you can hit *q* to reload less to see changes)). Or if you don't want to use tmux/tmuxinator, just open .tmuxinator.yaml and run commands from there manually.
